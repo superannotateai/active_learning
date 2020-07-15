@@ -5,23 +5,24 @@ Active Learning algorithms allow users to select a subset of his/her not yet ann
 
 ## Code Structure
 
-Here we provide an implementation of the active learning algorithm [Learning Loss for Active Learning"](https://arxiv.org/pdf/1905.03677.pdf) for classification, object detection and segmentation. Code for each application is provided in the coorresponding folder. Our code runs for a few 'cycles' and selects 1000 images per cycle, then trains the model on those 1000 images. This way we mimic future user's actions, as generation of entropy values for all the images at once and annotating top N images will result in worse performance compared to repeating the process for a few cycles and re-training the model after each cycle. The code generates csv files for each cycle, which can be uploaded to annotate.online.
+Here we provide an implementation of the active learning algorithm [Learning Loss for Active Learning"](https://arxiv.org/pdf/1905.03677.pdf) for classification, object detection, segmentation and human pose estimation. Code for each application is provided in the coorresponding folder. Our code runs for a few 'cycles' and selects 1000 or 500 images per cycle, then trains the model on those 1000/500 images. This way we mimic future user's actions, as generation of entropy values for all the images at once and annotating top N images will result in worse performance compared to repeating the process for a few cycles and re-training the model after each cycle. The code generates csv files for each cycle, which can be uploaded to annotate.online.
 
 ## Used open-source model codes
 
 For each task we integrated our active learning code into an open-source repository to demonstrate it's usage. Please refer to the corresponding repo's instructions for setup.
 
-Classification on Cifar 10 - https://github.com/kuangliu/pytorch-cifar
-Object Detection on Paskal VOC using SSD algorithm - https://github.com/amdegroot/ssd.pytorch
-Segmentation on cityscapes with DRN algorithm - https://github.com/fyu/drn
+Classification on Cifar 10 - https://github.com/kuangliu/pytorch-cifar  
+Object Detection on Paskal VOC using SSD algorithm - https://github.com/amdegroot/ssd.pytorch  
+Segmentation on cityscapes with DRN algorithm - https://github.com/fyu/drn  
+Human Pose Estimation on Coco Dataset with Deep High Resolution Networks - https://github.com/leoxiaobin/deep-high-resolution-net.pytorch  
 
 ## How to add active learning to my module?
 
-In order to add active learning to your model, the following steps must be performed:
+In order to add active learning to your model, the following steps must be performed:  
 
-1. Copy the 'active_learning' folder to your code.
-2. Implement functions 'get_active_learning_feature_channel_counts' and 'get_active_learning_features' inside your module. They will provide features to the active learning loss prediction module. Take a look into our sample code for the reference. 
-3. Add active learning loss prediction module to your model with the following lines:
+1. Copy the 'active_learning' folder to your code.  
+2. Implement functions 'get_active_learning_feature_channel_counts' and 'get_active_learning_features' inside your module. They will provide features to the active learning loss prediction module. Take a look into our sample code for the reference.  
+3. Add active learning loss prediction module to your model with the following lines:  
 ```
 from active_learning import ActiveLearning
 from active_loss import LossPredictionLoss

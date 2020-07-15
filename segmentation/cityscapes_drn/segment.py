@@ -332,7 +332,10 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # compute output
         if use_active_learning:
-            output, loss_pred = model(input_var) # Removed [0] here
+            if epoch < 200:
+                output, loss_pred = model(input_var)
+            else:
+                output, loss_pred = model(input_var, detach_lp=True)
             output = output[0]
         else:
             output = model(input_var)[0]
@@ -384,9 +387,9 @@ def train_seg(args):
     rand_state = np.random.RandomState(1311)
     device = 'cuda' if (torch.cuda.is_available()) else 'cpu'
 
-    # We have 2975 images total in the training set, so let's choose 150 images on each cycle,
+    # We have 2975 images total in the training set, so let's choose 500 for 3 cycles,
     # 1500 images total (~1/2 of total)
-    images_per_cycle = 150
+    images_per_cycle = 500
 
     batch_size = args.batch_size
     num_workers = args.workers
@@ -418,7 +421,7 @@ def train_seg(args):
     train_idx = []
     validation_accuracies = list()
     validation_mAPs = list()
-    progress = tqdm.tqdm(range(10))
+    progress = tqdm.tqdm(range(3))
     for cycle in progress:
         single_model = DRNSeg(args.arch, args.classes, None,
                               pretrained=True)
@@ -439,9 +442,10 @@ def train_seg(args):
 
         if args.use_active_learning and not cycle == 0:
             indices, losses = choose_active_learning_indices(
-                model, cycle, rand_state, pool_idx, dataset, device, count=images_per_cycle)
+                model, cycle, rand_state, pool_idx, dataset, device, count=images_per_cycle,
+                subset_factor=3)
             train_idx.extend(indices)
-            write_entropies_csv(dataset, indices, losses, "entropy_file_{}.csv".format(cycle)) 
+            # write_entropies_csv(dataset, indices, losses, "entropy_file_{}.csv".format(cycle)) 
         else:
             train_idx.extend(random_indices(pool_idx, rand_state, count=images_per_cycle))
 

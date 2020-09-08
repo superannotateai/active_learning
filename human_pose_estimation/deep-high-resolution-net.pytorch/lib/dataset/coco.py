@@ -443,3 +443,9 @@ class COCODataset(JointsDataset):
             info_str.append((name, coco_eval.stats[ind]))
 
         return info_str
+
+    # Needed for writing csv files to be uploaded to annotate.online.
+    def get_image_path(self, index):
+        db_rec = copy.deepcopy(self.db[idx])
+        return db_rec['image']
+

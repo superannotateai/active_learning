@@ -42,7 +42,7 @@ import tqdm
 sys.path.append(os.path.abspath('../../active_learning'))
 from active_learning import ActiveLearning
 from active_loss import LossPredictionLoss
-from active_learning_utils import choose_active_learning_indices, random_indices, write_entropies_csv
+from active_learning_utils import *
 
 
 def parse_args():
@@ -80,6 +80,12 @@ def parse_args():
                         required=False,
                         type=bool,
                         default=False)
+    parser.add_argument('--output_superannotate_csv_file',
+                        required=False,
+                        type=str,
+                        default=None,
+                        help='Path to the output csv file with the selected indices. Can be uploaded to annotate.online.')
+
 
 
     args = parser.parse_args()
@@ -168,12 +174,13 @@ def main():
         ).cuda()
 
         if args.use_active_learning and not cycle == 0:
-            indices, losses = choose_active_learning_indices(
+            indices, losses = choose_indices_loss_prediction_active_learning(
                 model, cycle, rand_state, pool_idx, train_dataset,
                 device, count=images_per_cycle, subset_factor=5, is_human_pose=True)
             train_idx.extend(indices)
-            # write_entropies_csv(train_dataset, indices, losses,
-            #    "entropy_file_{}.csv".format(cycle))
+            if args.output_superannotate_csv_file is not None:
+                write_entropies_csv(
+                    train_dataset, indices, losses, args.output_superannotate_csv_file);
         else:
             train_idx.extend(random_indices(pool_idx, rand_state, count=images_per_cycle))
 

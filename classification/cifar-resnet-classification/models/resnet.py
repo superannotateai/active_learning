@@ -85,12 +85,23 @@ class ResNet(nn.Module):
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
+    # Returns channel counts of features on which the Loss prediction module of
+    # active learning must run.
     def get_active_learning_feature_channel_counts(self):
         return [64, 128, 256, 512]
 
+    # Returns features on which the Loss prediction module of active learning
+    # must run. Must be called after 'forward'.
     def get_active_learning_features(self):
         return self.active_learning_features
-
+    
+    def get_discriminative_al_layer_shapes(self):
+        # All we have is one flat tensor of size 512.
+        return [[512]]
+ 
+    def get_discriminative_al_features(self):
+        return self.discriminative_al_features
+        
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
         out1 = self.layer1(out)
@@ -100,6 +111,7 @@ class ResNet(nn.Module):
         self.active_learning_features = [out1, out2, out3, out4]
         out5 = F.avg_pool2d(out4, 4)
         out5 = out5.view(out.size(0), -1)
+        self.discriminative_al_features = [out5]
         out5 = self.linear(out5)
         return out5
 

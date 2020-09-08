@@ -347,6 +347,9 @@ class PoseHighResolutionNet(nn.Module):
         return self.al_channels
 
     def get_active_learning_features(self):
+        print("Using feature shapes: **************************")
+        for f in self.al_features:
+            print (f.shape)
         return self.al_features
 
     def _make_transition_layer(

@@ -16,16 +16,19 @@ class LossPredictionLoss(nn.Module):
         super(LossPredictionLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, inputs, targets):
-        random = torch.randperm(inputs.size(0))
-        pred_loss = inputs[random]
-        pred_lossi = inputs[:inputs.size(0)//2]
-        pred_lossj = inputs[inputs.size(0)//2:]
-        target_loss = targets.reshape(inputs.size(0), 1)
-        target_loss = target_loss[random]
-        target_lossi = target_loss[:inputs.size(0)//2]
-        target_lossj = target_loss[inputs.size(0)//2:]
-        final_target = torch.sign(target_lossi - target_lossj)
+    def forward(self, input, target):
+        input = (
+            input - input.flip(0)
+        )[:len(input) // 2
+         ]  # [l_1 - l_2B, l_2 - l_2B-1, ... , l_B - l_B+1], where batch_size = 2B
+        target = (target - target.flip(0))[:len(target) // 2]
+        target = target.detach()
+        one = 2 * torch.sign(
+            torch.clamp(target, min=0)
+        ) - 1  # 1 operation which is defined by the authors
 
-        return F.margin_ranking_loss(pred_lossi, pred_lossj, final_target, margin=self.margin, reduction='mean')
-
+        loss = torch.sum(torch.clamp(self.margin - one * input, min=0))
+        loss = loss / input.size(
+            0
+        )  # Note that the size of input is already halved
+        return loss

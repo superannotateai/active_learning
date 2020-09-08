@@ -22,16 +22,18 @@ from torch import nn
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import torch.utils.data as data
-from torchvision import datasets, transforms
+from torchvision import datasets
 from torch.autograd import Variable
 
 import drn
-import data_transforms as transforms
+import data_transforms
 
 sys.path.append(os.path.abspath('../../active_learning'))
 from active_learning import ActiveLearning
 from active_loss import LossPredictionLoss
-from active_learning_utils import choose_active_learning_indices, random_indices, write_entropies_csv
+from active_learning_utils import *
+from discriminative_learning import *
+
 
 try:
     from modules import batchnormsync
@@ -93,7 +95,9 @@ class DRNSeg(nn.Module):
             pretrained=pretrained, num_classes=1000, remove_last_2_layers=True)
 
         # Remember channel sizes for the active learning.
-        self.channels = list(model.channels)
+        self.channels = list(model.get_active_learning_feature_channel_counts())
+        # Adding 2 more layers for the active learning.
+        self.channels.append(classes)
         self.channels.append(classes)
 
         pmodel = nn.DataParallel(model)
@@ -123,13 +127,24 @@ class DRNSeg(nn.Module):
         x = self.seg(x)
         self.active_learning_features.append(x)
         y = self.up(x)
+        self.active_learning_features.append(self.softmax(y))
         return self.softmax(y), x
 
     def get_active_learning_feature_channel_counts(self):
         return self.channels
 
     def get_active_learning_features(self):
+        #print("Active learning feature Shapes are ================")
+        #for f in self.active_learning_features:
+        #    print(f.size())
         return self.active_learning_features
+
+    def get_discriminative_al_layer_shapes(self):
+        # All we have is one flat tensor of size 512.
+        return self.base.get_discriminative_al_layer_shapes()
+
+    def get_discriminative_al_features(self):
+        return self.base.get_discriminative_al_features()
 
     def optim_parameters(self, memo=None):
         for param in self.base.parameters():
@@ -154,8 +169,8 @@ class SegList(torch.utils.data.Dataset):
     def __getitem__(self, index):
         data = [Image.open(join(self.data_dir, self.image_list[index]))]
         if self.label_list is not None:
-            data.append(Image.open(
-                join(self.data_dir, self.label_list[index])))
+            mask_path = join(self.data_dir, self.label_list[index])
+            data.append(Image.open(mask_path))
         data = list(self.transforms(*data))
         if self.out_name:
             if self.label_list is None:
@@ -174,6 +189,10 @@ class SegList(torch.utils.data.Dataset):
         if exists(label_path):
             self.label_list = [line.strip() for line in open(label_path, 'r')]
             assert len(self.image_list) == len(self.label_list)
+
+    # Needed for writing csv files to be uploaded to annotate.online.
+    def get_image_path(self, index):
+        return self.image_list[index]
 
 
 class SegListMS(torch.utils.data.Dataset):
@@ -194,7 +213,6 @@ class SegListMS(torch.utils.data.Dataset):
         if self.label_list is not None:
             data.append(Image.open(
                 join(self.data_dir, self.label_list[index])))
-        # data = list(self.transforms(*data))
         out_data = list(self.transforms(*data))
         ms_images = [self.transforms(item().resize((int(w * s), int(h * s)),
                                                     Image.BICUBIC))[0]
@@ -217,7 +235,7 @@ class SegListMS(torch.utils.data.Dataset):
 
 
 def validate(val_loader, model, criterion, eval_score=None, print_freq=40, num_classes=1000,
-             use_active_learning=False):
+             use_loss_prediction_al=False, use_discriminative_al=False):
     batch_time = AverageMeter()
     losses = AverageMeter()
     score = AverageMeter()
@@ -238,7 +256,7 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=40, num_c
         target_var = torch.autograd.Variable(target, volatile=True)
 
         # compute output
-        if use_active_learning:
+        if use_loss_prediction_al or use_discriminative_al:
             output = model(input_var)[0][0]
         else:
             output = model(input_var)[0]
@@ -257,6 +275,9 @@ def validate(val_loader, model, criterion, eval_score=None, print_freq=40, num_c
         _, pred = torch.max(output, 1)
         pred = pred.cpu().data.numpy()
         label = target.cpu().numpy()
+        # Remove the 'background' class and compute the matrix hist, where
+        # hist[i][j] is the number of pixels for which ground truth class
+        # was i, but predicted j.
         hist += fast_hist(pred.flatten(), label.flatten(), num_classes)
         current_mAP = round(np.nanmean(per_class_iu(hist)) * 100, 2)
         mAP.update(current_mAP)
@@ -306,7 +327,8 @@ def accuracy(output, target):
 
 
 def train(train_loader, model, criterion, optimizer, epoch,
-          eval_score=None, print_freq=10, use_active_learning=False, active_learning_lamda=1):
+          eval_score=None, print_freq=100, use_loss_prediction_al=False, active_learning_lamda=1, 
+          use_discriminative_al=False):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -316,6 +338,11 @@ def train(train_loader, model, criterion, optimizer, epoch,
     model.train()
 
     end = time.time()
+
+    # Values used for Loss Prediction Active Learning.
+    total_ranked = 0
+    correctly_ranked = 0
+    criterion_lp = LossPredictionLoss()
 
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
@@ -331,12 +358,14 @@ def train(train_loader, model, criterion, optimizer, epoch,
         target_var = torch.autograd.Variable(target)
 
         # compute output
-        if use_active_learning:
-            if epoch < 200:
+        if use_loss_prediction_al:
+            if epoch < 150:
                 output, loss_pred = model(input_var)
             else:
                 output, loss_pred = model(input_var, detach_lp=True)
             output = output[0]
+        elif use_discriminative_al:
+            output, labeled_unlabeled_predictions = model(input_var)
         else:
             output = model(input_var)[0]
 
@@ -344,9 +373,21 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # Compute means from [N, W, H] to [N].
         loss = loss.mean([1, 2])
-        if use_active_learning:
-            criterion_lp = LossPredictionLoss()
+        # Let the main model "warm-up" for a while, loss prediction does not
+        # work well otherwise.
+        if use_loss_prediction_al and epoch > 1:
             loss_prediction_loss = criterion_lp(loss_pred, loss)
+            # Also compute (an estimate) of the ranking accuracy for the training set.
+            batch_size = loss.shape[0]
+            for l1 in range(batch_size):
+                for l2 in range(l1):
+                    total_ranked += 1
+                    if (loss[l1] - loss[l2]) * (loss_pred[l1] - loss_pred[l2]) > 0:
+                        correctly_ranked += 1
+            if i % print_freq == 0:
+                logger.info(
+                    "loss.mean() = {} active_learning_lamda = {}, loss_prediction_loss = {}".format(
+                        loss.mean(), active_learning_lamda, loss_prediction_loss));
             loss = loss.mean() + active_learning_lamda * loss_prediction_loss
         else:
             loss = loss.mean()
@@ -371,10 +412,12 @@ def train(train_loader, model, criterion, optimizer, epoch,
                         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                         'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                         'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                        'Score {top1.val:.3f} ({top1.avg:.3f})'.format(
-                'Active Learning' if use_active_learning else 'Random selection',
+                        'Score {top1.val:.3f} ({top1.avg:.3f})'
+                        'Ranking accuracy estimate ({ranking_accuracy})'.format(
+                get_algorithm_name(use_loss_prediction_al, use_discriminative_al, None),
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=scores))
+                data_time=data_time, loss=losses, top1=scores,
+                ranking_accuracy=correctly_ranked/(total_ranked+0.00001)))
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
@@ -385,11 +428,12 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
 
 def train_seg(args):
     rand_state = np.random.RandomState(1311)
+    torch.manual_seed(1311)
     device = 'cuda' if (torch.cuda.is_available()) else 'cpu'
 
     # We have 2975 images total in the training set, so let's choose 500 for 3 cycles,
     # 1500 images total (~1/2 of total)
-    images_per_cycle = 500
+    images_per_cycle = 150
 
     batch_size = args.batch_size
     num_workers = args.workers
@@ -403,35 +447,43 @@ def train_seg(args):
     # Data loading code
     data_dir = args.data_dir
     info = json.load(open(join(data_dir, 'info.json'), 'r'))
-    normalize = transforms.Normalize(mean=info['mean'],
+    normalize = data_transforms.Normalize(mean=info['mean'],
                                      std=info['std'])
     t = []
     if args.random_rotate > 0:
-        t.append(transforms.RandomRotate(args.random_rotate))
+        t.append(data_transforms.RandomRotate(args.random_rotate))
     if args.random_scale > 0:
-        t.append(transforms.RandomScale(args.random_scale))
-    t.extend([transforms.RandomCrop(crop_size),
-              transforms.RandomHorizontalFlip(),
-              transforms.ToTensor(),
+        t.append(data_transforms.RandomScale(args.random_scale))
+    t.extend([data_transforms.RandomCrop(crop_size),
+              data_transforms.RandomHorizontalFlip(),
+              data_transforms.ToTensor(),
               normalize])
-    dataset = SegList(data_dir, 'train', transforms.Compose(t),
+    dataset = SegList(data_dir, 'train', data_transforms.Compose(t),
                 list_dir=args.list_dir)
+    training_dataset_no_augmentation = SegList(
+        data_dir, 'train',
+        data_transforms.Compose([data_transforms.ToTensor(), normalize]),
+        list_dir=args.list_dir
+    )
 
-    pool_idx = list(range(len(dataset)))
-    train_idx = []
+    unlabeled_idx = list(range(len(dataset)))
+    labeled_idx = []
     validation_accuracies = list()
     validation_mAPs = list()
-    progress = tqdm.tqdm(range(3))
+    progress = tqdm.tqdm(range(10))
     for cycle in progress:
         single_model = DRNSeg(args.arch, args.classes, None,
                               pretrained=True)
         if args.pretrained:
             single_model.load_state_dict(torch.load(args.pretrained))
 
-        optim_parameters = single_model.optim_parameters()
         # Wrap our model in Active Learning Model.
-        if args.use_active_learning:
-            single_model = ActiveLearning(single_model)
+        if args.use_loss_prediction_al:
+            single_model = ActiveLearning(
+                single_model, global_avg_pool_size=6, fc_width=256)
+        elif args.use_discriminative_al:
+            single_model = DiscriminativeActiveLearning(single_model)
+        optim_parameters = single_model.optim_parameters()
 
         model = torch.nn.DataParallel(single_model).cuda()
 
@@ -440,31 +492,42 @@ def train_seg(args):
 
         criterion.cuda()
 
-        if args.use_active_learning and not cycle == 0:
-            indices, losses = choose_active_learning_indices(
-                model, cycle, rand_state, pool_idx, dataset, device, count=images_per_cycle,
-                subset_factor=3)
-            train_idx.extend(indices)
-            # write_entropies_csv(dataset, indices, losses, "entropy_file_{}.csv".format(cycle)) 
+        if args.choose_images_with_highest_loss:
+            # Choosing images based on the ground truth labels. 
+            # We want to check if predicting loss with 100% accuracy would result to
+            # a good active learning algorithm.
+            new_indices, entropies = choose_new_labeled_indices_using_gt(
+                    model, cycle, rand_state, unlabeled_idx, training_dataset_no_augmentation,
+                    device, criterion, images_per_cycle)
         else:
-            train_idx.extend(random_indices(pool_idx, rand_state, count=images_per_cycle))
+            new_indices, entropies = choose_new_labeled_indices(
+                model, training_dataset_no_augmentation, cycle, rand_state,
+                labeled_idx, unlabeled_idx, device, images_per_cycle,
+                args.use_loss_prediction_al, args.use_discriminative_al, input_pickle_file=None)
+        labeled_idx.extend(new_indices)
+        print("Running on {} labeled images.".format(len(labeled_idx)));
+        if args.output_superannotate_csv_file is not None:
+            # Write image paths to csv file which can be uploaded to annotate.online.
+            write_entropies_csv(
+                training_dataset_no_augmentation, new_indices,
+                entropies, args.output_superannotate_csv_file)
 
         train_loader = torch.utils.data.DataLoader(
-            data.Subset(dataset, train_idx),
+            data.Subset(dataset, labeled_idx),
             batch_size=batch_size, shuffle=True, num_workers=num_workers,
             pin_memory=True, drop_last=True
         )
         val_loader = torch.utils.data.DataLoader(
-            SegList(data_dir, 'val', transforms.Compose([
-                transforms.RandomCrop(crop_size),
-                transforms.ToTensor(),
+            SegList(data_dir, 'val', data_transforms.Compose([
+                data_transforms.RandomCrop(crop_size),
+                data_transforms.ToTensor(),
                 normalize,
             ]), list_dir=args.list_dir),
             batch_size=batch_size, shuffle=False, num_workers=num_workers,
             pin_memory=True, drop_last=True
         )
 
-        # define loss function (criterion) and pptimizer
+        # define loss function (criterion) and optimizer.
         optimizer = torch.optim.SGD(optim_parameters,
                                     args.lr,
                                     momentum=args.momentum,
@@ -491,7 +554,7 @@ def train_seg(args):
         if args.evaluate:
             validate(val_loader, model, criterion, eval_score=accuracy,
                      num_classes=args.classes,
-                     use_active_learning=args.use_active_learning)
+                     use_loss_prediction_al=args.use_loss_prediction_al)
             return
 
         progress_epoch = tqdm.tqdm(range(start_epoch, args.epochs))
@@ -500,13 +563,13 @@ def train_seg(args):
             logger.info('Cycle {0} Epoch: [{1}]\tlr {2:.06f}'.format(cycle, epoch, lr))
             # train for one epoch
             train(train_loader, model, criterion, optimizer, epoch,
-                  eval_score=accuracy, use_active_learning=args.use_active_learning, 
+                  eval_score=accuracy, use_loss_prediction_al=args.use_loss_prediction_al, 
                   active_learning_lamda=args.lamda)
 
             # evaluate on validation set
             prec1, mAP1 = validate(val_loader, model, criterion, eval_score=accuracy,
                              num_classes=args.classes,
-                             use_active_learning=args.use_active_learning)
+                             use_loss_prediction_al=args.use_loss_prediction_al)
 
             is_best = prec1 > best_prec1
             best_prec1 = max(prec1, best_prec1)
@@ -525,9 +588,17 @@ def train_seg(args):
         validation_accuracies.append(best_prec1)
         validation_mAPs.append(best_mAP)
         print("{} accuracies: {} mAPs {}".format(
-            "Active Learning" if args.use_active_learning else "Random",
+            "Active Learning" if args.use_loss_prediction_al else "Random",
             str(validation_accuracies),
             str(validation_mAPs)))
+        # Compute histogram of loss values for the unlabeled part of training dataset.
+        # Uncomment next lines if you want to check the loss distribution.
+        # loss_value_histogram(
+        #     model, cycle, rand_state, unlabeled_idx,
+        #     training_dataset_no_augmentation, device, criterion)
+        # loss_value_min_max_average(
+        #     model, cycle, rand_state, unlabeled_idx,
+        #     dataset, device, criterion)
 
 
 def adjust_learning_rate(args, optimizer, epoch):
@@ -723,16 +794,16 @@ def test_seg(args):
 
     data_dir = args.data_dir
     info = json.load(open(join(data_dir, 'info.json'), 'r'))
-    normalize = transforms.Normalize(mean=info['mean'], std=info['std'])
+    normalize = data_transforms.Normalize(mean=info['mean'], std=info['std'])
     scales = [0.5, 0.75, 1.25, 1.5, 1.75]
     if args.ms:
-        dataset = SegListMS(data_dir, phase, transforms.Compose([
-            transforms.ToTensor(),
+        dataset = SegListMS(data_dir, phase, data_transforms.Compose([
+            data_transforms.ToTensor(),
             normalize,
         ]), scales, list_dir=args.list_dir)
     else:
-        dataset = SegList(data_dir, phase, transforms.Compose([
-            transforms.ToTensor(),
+        dataset = SegList(data_dir, phase, data_transforms.Compose([
+            data_transforms.ToTensor(),
             normalize,
         ]), list_dir=args.list_dir, out_name=True)
     test_loader = torch.utils.data.DataLoader(
@@ -820,11 +891,25 @@ def parse_args():
                         help='Turn on multi-scale testing')
     parser.add_argument('--with-gt', action='store_true')
     parser.add_argument('--test-suffix', default='', type=str)
-    parser.add_argument('--use-active-learning', dest='use_active_learning',
+    parser.add_argument('--use-loss-prediction-al',
+                        dest='use_loss_prediction_al',
                         default=False, type=bool,
-                        help='If True, will use active learning')
-    parser.add_argument('--lamda', default=1, type=int,
-                        help='Active learning loss weight')
+                        help='If True, will use loss prediction active learning algorithm.')
+    parser.add_argument('--choose_images_with_highest_loss',
+                        dest='choose_images_with_highest_loss',
+                        default=False, type=bool,
+                        help='If True, will use ground truth labels to select the images with highest loss.')
+    parser.add_argument('--lamda', default=1, type=float,
+                        help='Loss prediction active learning loss weight')
+    parser.add_argument('--use-discriminative-al',
+                        dest='use_discriminative_al',
+                        default=False, type=bool,
+                        help='If True, will use discriminative active learning algorithm.')
+    parser.add_argument('--output_superannotate_csv_file',
+                        required=False,
+                        type=str,
+                        default=None,
+                        help='Path to the output csv file with the selected indices. Can be uploaded to annotate.online.')
 
     args = parser.parse_args()
 

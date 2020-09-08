@@ -217,10 +217,21 @@ class DRN(nn.Module):
         return nn.Sequential(*modules)
 
     def get_active_learning_feature_channel_counts(self):
+        # print("Channels used {}".format(self.channels))
         return self.channels
 
     def get_active_learning_features(self):
+        #print("Active learning feature Shapes are ================")
+        # for f in self.active_learning_features[-1:]:
+        #    print(f.size())
         return self.active_learning_features
+
+    def get_discriminative_al_layer_shapes(self):
+        # All we have is one flat tensor of size 512. # TODO fix
+        return [[512]]
+
+    def get_discriminative_al_features(self):
+        return self.discriminative_al_features
 
     def forward(self, x):
         y = list()
@@ -238,6 +249,8 @@ class DRN(nn.Module):
         y.append(x)
 
         x = self.layer3(x)
+        self.discriminative_al_features = x # TODO
+
         y.append(x)
 
         x = self.layer4(x)
@@ -268,6 +281,9 @@ class DRN(nn.Module):
 
         # Remember feature values in y for active learning.
         self.active_learning_features = y
+        #for idx, f in enumerate(self.active_learning_features):
+        #    print("DEBUG: DRN feature shapes {}: {}".format(idx, f.size()))
+
         if self.out_middle:
             return x, y
         else:

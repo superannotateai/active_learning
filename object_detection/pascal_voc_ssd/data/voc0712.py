@@ -124,6 +124,11 @@ class VOCDetection(data.Dataset):
     def __len__(self):
         return len(self.ids)
 
+    # Needed for writing csv files to be uploaded to annotate.online.
+    def get_image_path(self, index):
+        img_id = self.ids[index]
+        return self._imgpath % img_id
+
     def pull_item(self, index):
         img_id = self.ids[index]
 

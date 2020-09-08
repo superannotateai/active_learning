@@ -23,7 +23,7 @@ import tqdm
 sys.path.append(os.path.abspath('../../active_learning'))
 from active_learning import ActiveLearning
 from active_loss import LossPredictionLoss
-from active_learning_utils import choose_active_learning_indices, random_indices, write_entropies_csv
+from active_learning_utils import *
 
 
 def str2bool(v):
@@ -109,6 +109,13 @@ parser.add_argument(
     default='weights/',
     help='Directory for saving checkpoint models'
 )
+parser.add_argument(
+    '--output_superannotate_csv_file',
+    required=False,
+    type=str,
+    default=None,
+    help='Path to the output csv file with the selected indices. Can be uploaded to annotate.online.')
+
 args = parser.parse_args()
 COCO_ROOT=''
 if torch.cuda.is_available():
@@ -241,10 +248,14 @@ def train():
                 transform=BaseTransform(300, MEANS)
             )
             device = 'cuda' if (torch.cuda.is_available() and args.cuda) else 'cpu'
-            indices, losses = choose_active_learning_indices(
+            indices, losses = choose_indices_loss_prediction_active_learning(
                 net, cycle, rand_state, pool_idx, dataset, device)
             train_idx.extend(indices)
-            # Write image paths to csv file, take a look at write_entropies_csv.
+
+            if args.output_superannotate_csv_file is not None:
+                # Write image paths to csv file which can be uploaded to annotate.online.
+                write_entropies_csv(
+                    dataset, indices,losses, args.output_superannotate_csv_file)
         else:
             train_idx.extend(random_indices(pool_idx, rand_state, count=1000))
         cfg = voc

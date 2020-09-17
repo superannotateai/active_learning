@@ -12,6 +12,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets
 from discriminative_learning import *
 
+from hdf5_dataset import HDF5Dataset
+
 import copy
 import pickle
 import csv
@@ -61,8 +63,9 @@ def choose_indices_loss_prediction_active_learning(
 
 
 def choose_discriminative_al_indices(
-        net, active_cycle, rand_state, labeled_idx, unlabeled_idx, dataset,
-        device, sub_sample_size=1000, is_human_pose=False):
+        discriminative_model, hdf5_dataset_path, total_image_count,
+        active_cycle, rand_state, labeled_idx,
+        unlabeled_idx, device, sub_sample_size=1000, is_human_pose=False):
     """ Chooses 'count' images, returns their indices in the dataset and 
         corresponding confidence values, using Discriminative Active Learning algorithm.
     """
@@ -70,35 +73,25 @@ def choose_discriminative_al_indices(
         new_idx = rand_state.choice(unlabeled_idx, count, replace=False)
         unlabeled_idx = [x for x in unlabeled_idx if x not in new_idx]
         return new_idx, None
+    dataset = HDF5Dataset(hdf5_dataset_path,
+        image_ids=["features_{}".format(i) for i in range(total_image_count)])
     cycle_pool = Subset(dataset, unlabeled_idx)
     cycle_loader = DataLoader(
-        cycle_pool, batch_size=1, shuffle=False, num_workers=2
+        cycle_pool, batch_size=1, shuffle=False, num_workers=1
     )
-    net.eval()
+    discriminative_model.eval()
     confidence_values = []
     with torch.no_grad():
-        if is_human_pose:
-            for batch_idx, (inputs, targets, target_weight, meta) in enumerate(cycle_loader):
-                inputs = inputs.to(device)
-                out, confidence = net(inputs)
-                # Apply softmax, and take the predicted probability that
-                # the image from unabeled set is from unlabeled set. 
-                # If the classifier is able to predict that a given example is from
-                # the unlabeled set, we better move it to labeled.
-                confidence = nn.Softmax(dim=1)(confidence)[:, 0]
-                confidence_values.append(confidence.item())
-        else:
-            for batch_idx, (inputs, targets) in enumerate(cycle_loader):
-                inputs = inputs.to(device)
-                out, confidence = net(inputs)
-                # Apply softmax, and take the predicted probability that
-                # the image from unabeled set is from unlabeled set. 
-                # If the classifier is able to predict that a given example is from
-                # the unlabeled set, we better move it to labeled.
-                confidence = nn.Softmax(dim=1)(confidence)[:, 0]
-                confidence_values.append(confidence.item())
-
-        print("Confidence values are: {}".format(confidence_values))
+        # Targets is for potential target values/masks for images, which are 0 for us.
+        for batch_idx, (inputs, targets) in enumerate(cycle_loader):
+            inputs = inputs.to(device)
+            outputs, confidence = discriminative_model(inputs)
+            # Apply softmax, and take the predicted probability that
+            # the image from unabeled set is from unlabeled set. 
+            # If the classifier is able to predict that a given example is from
+            # the unlabeled set, we better move it to labeled.
+            confidence = nn.Softmax(dim=1)(confidence)[:, 0]
+            confidence_values.append(confidence.item())
         confidence_values = np.array(confidence_values)
         idx = confidence_values.argsort()[-sub_sample_size:][::-1]
         new_labeled_idx = unlabeled_idx[idx]
@@ -313,7 +306,7 @@ def choose_new_labeled_indices(
         labeled_idx_copy = copy.deepcopy(labeled_idx)
         for i in range(subquery_count):
             # Reset the active learning layers.
-            net.reset_al_layers()
+            # net.reset_al_layers()
 
             subset_factor = 10
             cycle_subs_idx = rand_state.choice(
@@ -322,12 +315,14 @@ def choose_new_labeled_indices(
                 replace=False)
             # This is the only time when we train the active learning algorithm
             # during image subset selection.
-            train_discriminative_al(
-                net, device, complete_trainset_no_augmentation, labeled_idx_copy, cycle_subs_idx)
+            hdf5_dataset_path = "features_dataset.h5"
+            discriminative_model = train_discriminative_al(
+                net, device, complete_trainset_no_augmentation, labeled_idx_copy,
+                cycle_subs_idx, hdf5_dataset_path, len(complete_trainset_no_augmentation))
             new_indices, subquery_entropies = choose_discriminative_al_indices(
-                net, cycle, rand_state, labeled_idx_copy, cycle_subs_idx,
-                complete_trainset_no_augmentation, device,
-                sub_sample_size=images_per_cycle // subquery_count)
+                discriminative_model, hdf5_dataset_path, len(complete_trainset_no_augmentation),
+                cycle, rand_state, labeled_idx_copy,
+                cycle_subs_idx, device, sub_sample_size=images_per_cycle // subquery_count)
             entropies.extend(subquery_entropies.tolist())
             labeled_idx_copy.extend(new_indices)
             all_new_indices.extend(new_indices)

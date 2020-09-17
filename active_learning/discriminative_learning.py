@@ -8,21 +8,30 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 
+import time
 import numpy as np
 import tqdm
+import sys
+import os
+
+import h5py
+
+sys.path.append(os.path.abspath('../../hdf5_wrappers'))
+from hdf5_dataset import HDF5Dataset
+from hdf5_wrappers import matrix_to_hdf5
 
 
 class DiscriminativeActiveLearning(nn.Module):
     
-    def __init__(self, base_model):
+    def __init__(self, base_model, input_shapes):
         """ 
         Params:
             base_model - The model being trained. Used for image features representation.
-            input_shape - Shape of the input images. Used for selection of perceptron width.
+            input_shapes - Shape of the input images. Used for selection of perceptron width. Can use base_model.get_discriminative_al_layer_shapes() to get this values.
         """
         super(DiscriminativeActiveLearning, self).__init__()
         self.base_model = base_model
-        self.input_shapes = base_model.get_discriminative_al_layer_shapes()
+        self.input_shapes = input_shapes
         self.total_input_size = np.sum([np.prod(x) for x in self.input_shapes])
         # Running on Mnist, we will not use this.
         if self.total_input_size < 30:
@@ -58,11 +67,15 @@ class DiscriminativeActiveLearning(nn.Module):
         self.out.reset_parameters()
 
     def forward(self, x):
-        base_model_output = self.base_model.forward(x)
-        active_learning_features = self.base_model.get_discriminative_al_features()
-        # active_learning_features = [f.detach() for f in active_learning_features]
-        features = [torch.flatten(f, 1) for f in active_learning_features]
-        features_flat = torch.cat(features, dim=1);
+        if self.base_model is not None:
+            base_model_output = self.base_model.forward(x)
+            active_learning_features = self.base_model.get_discriminative_al_features()
+            # active_learning_features = [f.detach() for f in active_learning_features]
+            features = [torch.flatten(f, 1) for f in active_learning_features]
+            features_flat = torch.cat(features, dim=1);
+        else:
+            base_model_output = x
+            features_flat = x
         return base_model_output, self.sequential(features_flat)
 
     def freeze_main_layers(self, requires_grad):
@@ -96,16 +109,41 @@ class DiscriminativeDataset(torch.utils.data.Dataset):
         return self.total_size
 
 
-def train_discriminative_al(net, device, train_dataset, labeled_idx, unlabeled_idx):
-    """  Trains Discriminative Active Learning, the part which classifies image as labeled/unlabeled.
+def training_dataset_to_features(net, device, dataset, hdf5_file_path):
+    """ Runs training dataset through net and saves resulting features into a hdf5 file.
+    """
+    batch_size = 128
+    train_loader = DataLoader(
+        dataset, batch_size, shuffle=False, num_workers=4)
+    progress = tqdm.tqdm(
+        enumerate(train_loader),
+        "Creating hdf5 dataset with image features", total=len(train_loader))
+    with h5py.File(hdf5_file_path, 'w', libver='latest', swmr=True) as f:
+        with torch.no_grad():
+            for batch_idx, (inputs, targets) in progress:
+                inputs, targets = inputs.to(device), targets.to(device)
+                outputs = net(inputs)
+                al_features = net.get_discriminative_al_features()
+                features = [torch.flatten(f, 1) for f in al_features]
+                features_flat = torch.cat(features, dim=1)
+                for i in range(features_flat.shape[0]):
+                    matrix_to_hdf5(f, features_flat[i].cpu(),
+                        "features_{}".format(batch_size * batch_idx + i))
+
+
+def train_discriminative_al(net, device, train_dataset, labeled_idx, unlabeled_idx,
+        hdf5_dataset_path, total_image_count):
+    """ Trains Discriminative Active Learning, the part which classifies image as labeled/unlabeled.
+        Creates an hdf5 file with features of the main network.
     Args:
-        net(DiscriminativeActiveLearning) - The (trained) model with Active Learning part included.
+        net - The (trained) base model.
         train_dataset - Whole training dataset.
         labeled_idx - Indices of the labeled dataset entries.
         unlabeled_idx - Indices of the unlabeled dataset entries. This can be a selected subset of all unlabeled examples in the dataset of size 10*len(labeled_idx).
+    Returns:
+        A trained discriminative network.
     """
-    # Freeze layers of the main algorithm, train only the active learning classifier.
-    net.freeze_main_layers(requires_grad=False)
+    training_dataset_to_features(net, device, train_dataset, hdf5_dataset_path)
 
     optimizer = optim.Adam(net.parameters(), lr=0.0003)
     
@@ -113,24 +151,32 @@ def train_discriminative_al(net, device, train_dataset, labeled_idx, unlabeled_i
     class_weights = torch.FloatTensor(
         [len(labeled_idx) / total, len(unlabeled_idx) / total]).cuda()
     criterion = nn.CrossEntropyLoss(weight=class_weights)
-    discriminative_dataset = DiscriminativeDataset(train_dataset, labeled_idx, unlabeled_idx)
+
+    hdf5_dataset = HDF5Dataset(hdf5_dataset_path,
+        image_ids=["features_{}".format(i) for i in range(total_image_count)]) 
+    discriminative_dataset = DiscriminativeDataset(hdf5_dataset, labeled_idx, unlabeled_idx)
     train_loader = DataLoader(
             discriminative_dataset, batch_size=128,
-            shuffle=True, num_workers=2)
-    for epoch in range(5): # 5
+            shuffle=True, num_workers=4)
+    discriminative_model = DiscriminativeActiveLearning(
+        base_model=None, input_shapes=net.get_discriminative_al_layer_shapes())
+    discriminative_model = discriminative_model.to(device)
+    for epoch in range(500):
         print('Discriminative AL Epoch: %d' % epoch)
-        net.train()
+        discriminative_model.train()
         train_loss = 0
         correct = 0
         total = 0
         progress = tqdm.tqdm(enumerate(train_loader), total=len(train_loader))
         for batch_idx, (inputs, targets) in progress:
+            # HDF5Dataset class is designed to also return masks for each image,
+            # So it returns a dict, we need to take the 'image' part.
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             # We don't use the output predictions here, only the classifier output.
-            outputs, labeled_unlabeled_predictions = net(inputs)
-            # print("targets = {}".format(targets))
-            # print("predictions = {}".format(labeled_unlabeled_predictions));
+            # If we have pre-computed the network features for the whole dataset, and 
+            # discriminative model does not have the main model in it, outputs==inputs.
+            outputs, labeled_unlabeled_predictions = discriminative_model(inputs)
             loss = criterion(labeled_unlabeled_predictions, targets)
             loss.backward()
             optimizer.step()
@@ -147,7 +193,6 @@ def train_discriminative_al(net, device, train_dataset, labeled_idx, unlabeled_i
         # Early stopping, stop if prediction accuracy is above 98%.
         if correct / total >= 0.982:
             break
-    # Unfreeze layers of the main algorithm. Not really required.
-    net.freeze_main_layers(requires_grad=True)
+    return discriminative_model
 
 

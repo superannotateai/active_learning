@@ -146,10 +146,10 @@ def train(epoch, net, train_loader, optimizer,
             else:
                 outputs, loss_pred = net(inputs, detach_lp=True)
             loss_pred = loss_pred.view(loss_pred.size(0))
-        elif use_discriminative_al:
-            # We are not training the active learning part here, will be 
-            # trained separataly layer.
-            outputs, labeled_unlabeled_predictions = net(inputs)
+        #elif use_discriminative_al:
+        #    # We are not training the active learning part here, will be 
+        #    # trained separataly layer.
+        #    outputs, labeled_unlabeled_predictions = net(inputs)
         else:
             outputs = net(inputs)
         loss = criterion(outputs, targets)
@@ -256,7 +256,10 @@ def run_training(
         if use_loss_prediction_al:
             net = ActiveLearning(net)
         elif use_discriminative_al:
-            net = DiscriminativeActiveLearning(net)
+            # Intentionally left this block here. We do not wrap the model in discriminative AL model
+            # Doing so hurts the performance.
+            pass
+            # net = DiscriminativeActiveLearning(net)
         net = net.to(device)
         if args.resume:
             # Load checkpoint.

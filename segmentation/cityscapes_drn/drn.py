@@ -3,6 +3,7 @@ import pdb
 import torch.nn as nn
 import math
 import torch.utils.model_zoo as model_zoo
+from mc_dropout import MCDropout
 
 BatchNorm = nn.BatchNorm2d
 
@@ -111,9 +112,10 @@ class DRN(nn.Module):
     def __init__(self, block, layers, num_classes=1000,
                  channels=(16, 32, 64, 128, 256, 512, 512, 512),
                  out_map=False, out_middle=False, pool_size=28, arch='D',
-                 remove_last_2_layers=False # If set to True, will remove the last 2 layers
-                 ):
+                 remove_last_2_layers=False, # If set to True, will remove the last 2 layers
+                 add_dropout=False):
         super(DRN, self).__init__()
+        self.add_dropout = add_dropout
 
         # Remember the output channel counts for active learning.
         self.channels = channels
@@ -201,7 +203,8 @@ class DRN(nn.Module):
         for i in range(1, blocks):
             layers.append(block(self.inplanes, planes, residual=residual,
                                 dilation=(dilation, dilation)))
-
+        if self.add_dropout:
+            layers.append(MCDropout(p=0.5, force_dropout = True))
         return nn.Sequential(*layers)
 
     def _make_conv_layers(self, channels, convs, stride=1, dilation=1):
@@ -292,8 +295,9 @@ class DRN(nn.Module):
 
 class DRN_A(nn.Module):
 
-    def __init__(self, block, layers, num_classes=1000):
+    def __init__(self, block, layers, num_classes=1000, add_dropout=False):
         self.inplanes = 64
+        self.add_dropout = add_dropout
         super(DRN_A, self).__init__()
         self.out_dim = 512 * block.expansion
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,
@@ -340,7 +344,8 @@ class DRN_A(nn.Module):
         for i in range(1, blocks):
             layers.append(block(self.inplanes, planes,
                                 dilation=(dilation, dilation)))
-
+        if self.add_dropout:
+            layers.append(MCDropout(p=0.5, force_dropout = True))
         return nn.Sequential(*layers)
 
     def forward(self, x):

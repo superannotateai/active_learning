@@ -57,8 +57,22 @@ python3 tools/train.py --cfg experiments/coco/hrnet/w32_256x192_adam_lr1e-3.yaml
 cd segmentation/cityscapes_drn
 # For running with random selection.
 python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100
+
 # For running with loss prediction active learning.
 python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100 --use-loss-prediction-al=True --lamda=0.01
+
+# For selecting 150 images based on largest entropy value for D=10 MC dropout runs.
+python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100 --choose-images-with-highest-uncertainty=True --use_variance_as_uncertainty=False
+
+# For selecting 150 images based on largest variance value for D=10 MC dropout runs.
+python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100 --choose-images-with-highest-uncertainty=True --use_variance_as_uncertainty=True
+
+# For selecting 4755 superpixels based on largest mean enropy value for D=10 MC dropout runs.
+python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100 --entropy-superpixels=True --use_variance_as_uncertainty=False
+
+# For selecting 4755 superpixels based on largest mean variance value for D=10 MC dropout runs.
+python3 segment.py train -d datasets/cityscapes -c 19 -s 896 --arch drn_d_22 --batch-size 4 --epochs 250 --lr 0.01 --momentum 0.9 --step 100 --entropy-superpixels=True --use_variance_as_uncertainty=True
+
 ```
 
 ## Using "learning loss for active learning" algorithm with your dataset and model

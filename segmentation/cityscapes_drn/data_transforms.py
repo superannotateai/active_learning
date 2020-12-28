@@ -13,7 +13,7 @@ class RandomCrop(object):
         else:
             self.size = size
 
-    def __call__(self, image, label, *args):
+    def __call__(self, image, label, instance_label=None, *args):
         assert label is None or image.size == label.size, \
             "image and label doesn't have the same size {} / {}".format(
                 image.size, label.size)
@@ -41,6 +41,8 @@ class RandomCrop(object):
         results = [image.crop((x1, y1, x1 + tw, y1 + th))]
         if label is not None:
             results.append(label.crop((x1, y1, x1 + tw, y1 + th)))
+        if instance_label is not None:
+            results.append(instance_label.crop((x1, y1, x1 + tw, y1 + th)))
         results.extend(args)
         return results
 
@@ -51,7 +53,7 @@ class RandomScale(object):
             scale = [1 / scale, scale]
         self.scale = scale
 
-    def __call__(self, image, label):
+    def __call__(self, image, label, instance_label=None):
         ratio = random.uniform(self.scale[0], self.scale[1])
         w, h = image.size
         tw = int(ratio * w)
@@ -62,6 +64,10 @@ class RandomScale(object):
             interpolation = Image.ANTIALIAS
         else:
             interpolation = Image.CUBIC
+        if instance_label is not None:
+            return image.resize((tw, th), interpolation), \
+               label.resize((tw, th), Image.NEAREST), \
+               instance_label.resize((tw, th), Image.NEAREST)
         return image.resize((tw, th), interpolation), \
                label.resize((tw, th), Image.NEAREST)
 
@@ -75,7 +81,7 @@ class RandomRotate(object):
     def __init__(self, angle):
         self.angle = angle
 
-    def __call__(self, image, label=None, *args):
+    def __call__(self, image, label=None, instance_label=None, *args):
         assert label is None or image.size == label.size
 
         w, h = image.size
@@ -87,9 +93,16 @@ class RandomRotate(object):
             label = label.rotate(angle, resample=Image.NEAREST)
             label = label.crop((w, h, w + w, h + h))
 
+        if instance_label is not None:
+            instance_label = pad_image('constant', instance_label, h, h, w, w, value=255)
+            instance_label = instance_label.rotate(angle, resample=Image.NEAREST)
+            instance_label = instance_label.crop((w, h, w + w, h + h))
+
         image = pad_image('reflection', image, h, h, w, w)
         image = image.rotate(angle, resample=Image.BILINEAR)
         image = image.crop((w, h, w + w, h + h))
+        if instance_label is not None:
+            return image, label, instance_label
         return image, label
 
 
@@ -97,12 +110,16 @@ class RandomHorizontalFlip(object):
     """Randomly horizontally flips the given PIL.Image with a probability of 0.5
     """
 
-    def __call__(self, image, label):
+    def __call__(self, image, label, instance_label=None):
         if random.random() < 0.5:
             results = [image.transpose(Image.FLIP_LEFT_RIGHT),
                        label.transpose(Image.FLIP_LEFT_RIGHT)]
+            if instance_label is not None:
+                results.append(instance_label.transpose(Image.FLIP_LEFT_RIGHT))
         else:
             results = [image, label]
+            if instance_label is not None:
+                results.append(instance_label)
         return results
 
 
@@ -116,13 +133,16 @@ class Normalize(object):
         self.mean = torch.FloatTensor(mean)
         self.std = torch.FloatTensor(std)
 
-    def __call__(self, image, label=None):
+    def __call__(self, image, label=None, instance_label=None):
         for t, m, s in zip(image, self.mean, self.std):
             t.sub_(m).div_(s)
         if label is None:
             return image,
         else:
-            return image, label
+            if instance_label is None:
+                return image, label
+            else:
+                return image, label, instance_label
 
 
 def pad_reflection(image, top, bottom, left, right):
@@ -230,7 +250,7 @@ class ToTensor(object):
     [0, 255] to a torch.FloatTensor of shape (C x H x W) in the range [0.0, 1.0].
     """
 
-    def __call__(self, pic, label=None):
+    def __call__(self, pic, label=None, instance_label=None):
         if isinstance(pic, np.ndarray):
             # handle numpy array
             img = torch.from_numpy(pic)
@@ -250,7 +270,13 @@ class ToTensor(object):
         if label is None:
             return img,
         else:
-            return img, torch.LongTensor(np.array(label, dtype=np.int))
+            if instance_label is None:
+                return img, torch.LongTensor(np.array(label, dtype=np.int))
+            else:
+                #print("======== ToTensor with {}".format(instance_label))
+                #print("======== ToTensor with {}".format(np.array(instance_label, dtype=np.int)))
+                #print("======== ToTensor.unqiue is {}".format(np.unique(np.array(instance_label, dtype=np.int))))
+                return img, torch.LongTensor(np.array(label, dtype=np.int)),  torch.LongTensor(np.array(instance_label, dtype=np.int))
 
 
 class Compose(object):

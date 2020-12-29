@@ -111,7 +111,7 @@ class DRNSeg(nn.Module):
         self.channels.append(classes)
         self.channels.append(classes)
 
-        pmodel = nn.DataParallel(model, device_ids=[0, 1, 2])
+        pmodel = nn.DataParallel(model, device_ids=[0])
         if pretrained_model is not None:
             pmodel.load_state_dict(pretrained_model)
         self.base = model
@@ -651,7 +651,7 @@ def compute_uncertainty_map(model, inputs, device, mc_dropout=False, prediction_
 
 def choose_new_labeled_indices_with_highest_uncertainty(
         model, cycle, rand_state, unlabeled_idx, dataset, device, subset_factor=10,
-        mc_dropout=False, images_per_cycle=150):
+        mc_dropout=False, images_per_cycle=150, use_variance_as_uncertainty=True):
     if cycle == 0:
         idx = rand_state.choice(unlabeled_idx, images_per_cycle, replace=False)
         for id in idx:
@@ -676,7 +676,7 @@ def choose_new_labeled_indices_with_highest_uncertainty(
         for batch_idx, (inputs, _targets) in enumerate(cycle_loader):
             uncertainties_for_batch = compute_uncertainty_map(
                 model, inputs, device, mc_dropout=mc_dropout,
-                use_variance=args.use_variance_as_uncertainty)
+                use_variance=use_variance_as_uncertainty)
             # Now we need to compute the mean uncertainty for each superpixel.
             for i in range(uncertainties_for_batch.shape[0]):
                 image_index = batch_idx * uncertainties_for_batch.shape[0] + i
@@ -862,7 +862,8 @@ def train_seg(args):
         elif args.choose_images_with_highest_uncertainty:
             new_indices, entropies = choose_new_labeled_indices_with_highest_uncertainty(
                     model, cycle, rand_state, unlabeled_idx, training_dataset_no_augmentation,
-                    device, mc_dropout=True, images_per_cycle=images_per_cycle)
+                    device, mc_dropout=True, images_per_cycle=images_per_cycle,
+                    use_variance_as_uncertainty=args.use_variance_as_uncertainty)
             labeled_idx.extend(new_indices)
         else:
             new_indices, entropies = choose_new_labeled_indices(
@@ -943,7 +944,7 @@ def train_seg(args):
             single_model = DiscriminativeActiveLearning(single_model)
         optim_parameters = single_model.optim_parameters()
 
-        model = torch.nn.DataParallel(single_model, device_ids=[0, 1, 2]).cuda()
+        model = torch.nn.DataParallel(single_model, device_ids=[0]).cuda()
 
         # Don't apply a 'mean' reduction, we need the whole loss vector.
         criterion = nn.NLLLoss(ignore_index=255, reduction='none')
@@ -997,7 +998,7 @@ def train_seg(args):
                     args.arch, args.classes, None,
                     pretrained=True, add_dropout=False)
                 validation_model = torch.nn.DataParallel(
-                    single_model, device_ids=[0, 1, 2]).cuda()
+                    single_model, device_ids=[0]).cuda()
                 validation_model.module.load_state_dict(torch.load(checkpoint_path))
             else:
                 validation_model = model
@@ -1226,7 +1227,7 @@ def test_seg(args):
                           pretrained=False)
     if args.pretrained:
         single_model.load_state_dict(torch.load(args.pretrained))
-    model = torch.nn.DataParallel(single_model, device_ids=[0, 1, 2]).cuda()
+    model = torch.nn.DataParallel(single_model, device_ids=[0]).cuda()
 
     data_dir = args.data_dir
     info = json.load(open(join(data_dir, 'info.json'), 'r'))

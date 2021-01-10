@@ -31,6 +31,7 @@ from skimage.segmentation import watershed
 from skimage.color import rgb2gray
 from skimage.filters import sobel
 from skimage import measure
+from scipy import ndimage, misc
 
 import drn
 import data_transforms
@@ -111,7 +112,7 @@ class DRNSeg(nn.Module):
         self.channels.append(classes)
         self.channels.append(classes)
 
-        pmodel = nn.DataParallel(model, device_ids=[0])
+        pmodel = nn.DataParallel(model, device_ids=[0, 1, 2, 3])
         if pretrained_model is not None:
             pmodel.load_state_dict(pretrained_model)
         self.base = model
@@ -145,9 +146,6 @@ class DRNSeg(nn.Module):
         return self.channels
 
     def get_active_learning_features(self):
-        #print("Active learning feature Shapes are ================")
-        #for f in self.active_learning_features:
-        #    print(f.size())
         return self.active_learning_features
 
     def get_discriminative_al_layer_shapes(self):
@@ -404,13 +402,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
         else:
             output = model(input_var)[0]
 
-        if entropy_superpixels:
-            # This is for partially annotated images. 250 marks a pixel of the image,
-            # which is not yet annotated, I.E. we don't have the ground truth for it
-            # and must not compute any loss for it.
-            loss = criterion(output, target_var)
-        else:
-            loss = criterion(output, target_var)
+        loss = criterion(output, target_var)
         # Compute means from shape [N, W, H] to [N].
         loss = loss.mean([1, 2])
         # Let the main model "warm-up" for 1 epoch, loss prediction does not
@@ -614,7 +606,8 @@ class PartiallyLabeledDataset(torch.utils.data.Dataset):
         return len(self.dataset)
 
 
-def compute_uncertainty_map(model, inputs, device, mc_dropout=False, prediction_steps_count=10,
+def compute_uncertainty_map(
+        model, inputs, device, mc_dropout=False, prediction_steps_count=5,
         use_variance=False):
     """ Computes and returns some uncertainty map for a given batch.
     """
@@ -633,9 +626,11 @@ def compute_uncertainty_map(model, inputs, device, mc_dropout=False, prediction_
         # We can not keep these tensors on GPUs, will run out of memory, moving to CPU.
         predictions_batches = []
         for i in range(prediction_steps_count):
-            predictions_batches.append(model(inputs)[0].cpu().numpy())
+            output = model(inputs)[0].cpu().numpy()
+            predictions_batches.append(output)
+
         predictions = np.stack(predictions_batches, axis=1)
-        #print("predictions.shape = {}".format(predictions.shape))
+        predictions = scipy.special.softmax(predictions, axis=2)
         if use_variance:
             # Predictions has shape (Batch#, prediction_steps_count, 19, 1024, 2048)
             X = np.var(predictions, axis=1)
@@ -643,9 +638,7 @@ def compute_uncertainty_map(model, inputs, device, mc_dropout=False, prediction_
             return np.mean(X, axis=1)
         else:
             out = np.mean(predictions, axis=1)
-            entropy = -np.sum(
-                scipy.special.softmax(out, axis=1) * scipy.special.log_softmax(out, axis=1),
-                axis=1)
+            entropy = -np.sum(out * np.log(out), axis=1)
             return entropy
 
 
@@ -665,8 +658,9 @@ def choose_new_labeled_indices_with_highest_uncertainty(
         min(subset_factor * images_per_cycle, len(unlabeled_idx)),
         replace=False)
     cycle_pool = Subset(dataset, cycle_subs_idx)
+    batch_size = 4
     cycle_loader = DataLoader(
-        cycle_pool, batch_size=4, shuffle=False, num_workers=2
+        cycle_pool, batch_size, shuffle=False, num_workers=2
     )
 
     model.eval()
@@ -679,11 +673,21 @@ def choose_new_labeled_indices_with_highest_uncertainty(
                 use_variance=use_variance_as_uncertainty)
             # Now we need to compute the mean uncertainty for each superpixel.
             for i in range(uncertainties_for_batch.shape[0]):
-                image_index = batch_idx * uncertainties_for_batch.shape[0] + i
-                image_uncertainties.append([image_index, np.mean(uncertainties_for_batch[i])])
+                image_index = batch_idx * batch_size + i
+                uncertainty_map = uncertainties_for_batch[i]
+                #uncertainty_map_thres = (uncertainty_map > 1).astype('uint8')
+                #uncertainty_map_median_filtered = ndimage.median_filter(uncertainty_map_thres, size=10)
+                image_uncertainties.append([image_index, np.mean(uncertainty_map)])
                 if image_index % 50 == 0:
                     writer.add_image('image_uncertainties_{}'.format(image_index),
-                            np.expand_dims(uncertainties_for_batch[i], axis=0), cycle)
+                            np.expand_dims(uncertainty_map, axis=0), cycle)
+                    #writer.add_image('image_uncertainties_thresholded{}'.format(image_index),
+                    #        np.expand_dims(uncertainty_map_thres, axis=0), cycle)                    
+                    #writer.add_image('image_uncertainties_median_filtered{}'.format(image_index),
+                    #        np.expand_dims(ndimage.median_filter(uncertainty_map, size=10), axis=0), cycle)
+                    #writer.add_image('image_uncertainties_thresholded_median_filtered{}'.format(image_index),
+                    #        np.expand_dims(uncertainty_map_median_filtered, axis=0), cycle)
+
     
     # Sort by intensity value.
     image_uncertainties.sort(key=lambda x: x[1])
@@ -695,6 +699,8 @@ def choose_new_labeled_indices_with_highest_uncertainty(
     new_labeled_idx = []
     for id in new_images:
         new_labeled_idx.append(cycle_subs_idx[id])
+        if cycle_subs_idx[id] not in unlabeled_idx:
+            print("Can't remove index {} from unlabeled_idx.".format(cycle_subs_idx[id]))
         unlabeled_idx.remove(cycle_subs_idx[id])
 
     for idx, entropy in enumerate(entropies):
@@ -705,11 +711,13 @@ def choose_new_labeled_indices_with_highest_uncertainty(
 
 def choose_superpixels_with_highest_entropies(
         model, cycle, rand_state, unlabeled_superpixels, training_dataset_no_augmentation,
-        device, criterion, all_superpixels, instances_per_cycle, mc_dropout=False):
+        device, criterion, all_superpixels, instances_per_cycle, mc_dropout=True,
+        use_variance_as_uncertainty=True):
     # Tensorboard summary writer.
     writer = SummaryWriter()
 
-    cycle_loader = DataLoader(training_dataset_no_augmentation, batch_size=4,
+    batch_size = 4
+    cycle_loader = DataLoader(training_dataset_no_augmentation, batch_size=batch_size,
                               shuffle=False, num_workers=32)
     model.eval()
     superpixels_with_entropies = []
@@ -718,10 +726,10 @@ def choose_superpixels_with_highest_entropies(
         for batch_idx, (inputs, _targets, _instance_targets) in enumerate(cycle_loader):
             uncertainties_for_batch = compute_uncertainty_map(
                 model, inputs, device, mc_dropout=mc_dropout,
-                use_variance=args.use_variance_as_uncertainty)
+                use_variance=use_variance_as_uncertainty)
             # Now we need to compute the mean uncertainty for each superpixel.
             for i in range(uncertainties_for_batch.shape[0]):
-                image_index = batch_idx * uncertainties_for_batch.shape[0] + i
+                image_index = batch_idx * batch_size + i
                 uncertainty_map = uncertainties_for_batch[i]
                 if image_index % 50 == 0:
                     writer.add_image('image_uncertainties_{}'.format(image_index),
@@ -848,7 +856,8 @@ def train_seg(args):
                         model, cycle, rand_state, unlabeled_superpixels,
                         training_dataset_no_augmentation,
                         device, criterion, all_superpixels, instances_per_cycle,
-                        mc_dropout=args.mc_dropout)
+                        mc_dropout=args.mc_dropout,
+                        use_variance_as_uncertainty=args.use_variance_as_uncertainty)
             labeled_superpixels.extend(new_superpixels)
             unlabeled_superpixels = [x for x in unlabeled_superpixels if x not in new_superpixels]
         elif args.choose_images_with_highest_loss:
@@ -862,7 +871,8 @@ def train_seg(args):
         elif args.choose_images_with_highest_uncertainty:
             new_indices, entropies = choose_new_labeled_indices_with_highest_uncertainty(
                     model, cycle, rand_state, unlabeled_idx, training_dataset_no_augmentation,
-                    device, mc_dropout=True, images_per_cycle=images_per_cycle,
+                    device, subset_factor=3, 
+                    mc_dropout=args.mc_dropout, images_per_cycle=images_per_cycle,
                     use_variance_as_uncertainty=args.use_variance_as_uncertainty)
             labeled_idx.extend(new_indices)
         else:
@@ -944,7 +954,7 @@ def train_seg(args):
             single_model = DiscriminativeActiveLearning(single_model)
         optim_parameters = single_model.optim_parameters()
 
-        model = torch.nn.DataParallel(single_model, device_ids=[0]).cuda()
+        model = torch.nn.DataParallel(single_model, device_ids=[0, 1, 2, 3]).cuda()
 
         # Don't apply a 'mean' reduction, we need the whole loss vector.
         criterion = nn.NLLLoss(ignore_index=255, reduction='none')
@@ -998,7 +1008,7 @@ def train_seg(args):
                     args.arch, args.classes, None,
                     pretrained=True, add_dropout=False)
                 validation_model = torch.nn.DataParallel(
-                    single_model, device_ids=[0]).cuda()
+                    single_model, device_ids=[0, 1, 2, 3]).cuda()
                 validation_model.module.load_state_dict(torch.load(checkpoint_path))
             else:
                 validation_model = model
@@ -1227,7 +1237,7 @@ def test_seg(args):
                           pretrained=False)
     if args.pretrained:
         single_model.load_state_dict(torch.load(args.pretrained))
-    model = torch.nn.DataParallel(single_model, device_ids=[0]).cuda()
+    model = torch.nn.DataParallel(single_model, device_ids=[0, 1, 2, 3]).cuda()
 
     data_dir = args.data_dir
     info = json.load(open(join(data_dir, 'info.json'), 'r'))
@@ -1371,7 +1381,7 @@ def parse_args():
                         help='Path to the output csv file with the selected indices. Can be uploaded to annotate.online.')
     parser.add_argument('--use-variance-as-uncertainty',
                         dest='use_variance_as_uncertainty',
-                        default=True, type=bool,
+                        default=False, type=bool,
                         help='If True, will use variance as uncertainty value, else will use entropy.')
 
     args = parser.parse_args()

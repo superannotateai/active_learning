@@ -4,9 +4,9 @@ Active Learning algorithms allow users to select a subset of his/her not yet ann
 
 Here we provide an implementation of the "Learning loss for active learning" algorithm [Learning Loss for Active Learning"](https://arxiv.org/pdf/1905.03677.pdf) for classification, object detection, human pose estimation and segmentation tasks. We also provide implementation for the [Discriminative Active Learning](https://arxiv.org/abs/1907.06347) algorithm for classification on cifar-10.
 
-Our code runs for a few 'cycles' and selects a number of images (150 for segmentation, 1000 for the other tasks) images per cycle, then trains the model on those images. This way we mimic future user's actions, as generation of entropy values for all the images at once and annotating top N images will result in worse performance compared to repeating the process for a few cycles and re-training the model after each cycle. The code generates csv files for each cycle, which can be uploaded to [annotate.online](annotate.online).
+Our code runs for a few 'cycles' and selects a number of images (150 for segmentation, 1000 for the other tasks) images per cycle, then trains the model on those images. This way we mimic future user's actions, as generation of entropy values for all the images at once and annotating top N images will result in worse performance compared to repeating the process for a few cycles and re-training the model after each cycle. The code generates csv files for each cycle, which can be uploaded to [SuperAnnotate](https://app.superannotate.com).
 
-More detailed description of our work can be found in our [Blog Post](URL_Here).
+More detailed description of our work can be found in our [Blog Post](https://blog.superannotate.com).
 
 ![Superannotate Screenshot](images/uploading_entropy_csv.jpg)
 
